@@ -185,43 +185,12 @@ namespace MobiclipDecoder
              while ((res = d.ReadPacket()) == 0) ;
              d.s2.Flush();
              d.s2.Close();*/
-            OpenFileDialog f = new OpenFileDialog();
-            f.Filter = "All Supported Mobiclip Video Files (*.moflex;*.mods;*.dat;*.mo;*.vx2)|*.moflex;*.mods;*.dat;*.mo;*.vx2|3DS Mobiclip Video Files (*.moflex)|*.moflex|DS Mobiclip Video Files (*.mods)|*.mods|Wii Mobiclip Video Files (*.dat;*.mo)|*.dat;*.mo";
-            if (f.ShowDialog() == System.Windows.Forms.DialogResult.OK
-                && f.FileName.Length > 0)
-            {
-                byte[] sig = new byte[4];
-                Stream s = File.OpenRead(f.FileName);
-                s.Read(sig, 0, 4);
-                s.Close();
-                if (sig[0] == 0x4C && sig[1] == 0x32 && sig[2] == 0xAA && sig[3] == 0xAB)
-                {
-                    MobiThread = new Thread((ParameterizedThreadStart)MoflexThreadMain);
-                    MobiThread.Start(f.FileName);
-                }
-                else if (sig[0] == 0x4D && sig[1] == 0x4F && sig[2] == 0x44 && sig[3] == 0x53)
-                {
-                    MobiThread = new Thread((ParameterizedThreadStart)ModsThreadMain);
-                    MobiThread.Start(f.FileName);
-                }
-                else if (sig[0] == 0x4D && sig[1] == 0x4F && sig[2] == 0x43 && sig[3] == 0x35)
-                {
-                    MobiThread = new Thread((ParameterizedThreadStart)MOC5ThreadMain);
-                    MobiThread.Start(f.FileName);
-                }
-                else if (Path.GetExtension(f.FileName).ToLower() == ".vx2")
-                {
-                    MobiThread = new Thread((ParameterizedThreadStart)VX2ThreadMain);
-                    MobiThread.Start(f.FileName);
-                }
-                //else if (sig[0] == 0x56 && sig[1] == 0x58 && sig[2] == 0x44 && sig[3] == 0x53)
-                //{
-                //    MobiThread = new Thread((ParameterizedThreadStart)VxThreadMain);
-                //    MobiThread.Start(f.FileName);
-                //}
-                else Application.Exit();
+            string[] files = Directory.GetFiles(".", "*.mo", SearchOption.AllDirectories);
+
+            foreach (string file in files) {
+                MobiThread = new Thread((ParameterizedThreadStart)MOC5ThreadMain);
+                MobiThread.Start(file);
             }
-            else Application.Exit();
         }
 
         private void VX2ThreadMain(Object Args)
@@ -279,6 +248,19 @@ namespace MobiclipDecoder
             fs.Close();
         }
 
+        private static ImageCodecInfo GetEncoderInfo(String mimeType)
+        {
+            int j;
+            ImageCodecInfo[] encoders;
+            encoders = ImageCodecInfo.GetImageEncoders();
+            for(j = 0; j < encoders.Length; ++j)
+            {
+                if(encoders[j].MimeType == mimeType)
+                    return encoders[j];
+            }
+            return null;
+        }
+
         private void MOC5ThreadMain(Object Args)
         {
             byte[] data = File.ReadAllBytes((String)Args);
@@ -287,9 +269,19 @@ namespace MobiclipDecoder
             uint height = IOUtil.ReadU32LE(data, 0x20);
             Invoke((Action)delegate { ClientSize = new Size((int)width, (int)height); });
             double fps = IOUtil.ReadU32LE(data, 0xC) / 128d;
+            uint i = 1;
             TimeSpan ts = TimeSpan.FromMilliseconds(1000d / (double)(fps));
             LibMobiclip.Codec.Mobiclip.MobiclipDecoder d = new LibMobiclip.Codec.Mobiclip.MobiclipDecoder(width, height, LibMobiclip.Codec.Mobiclip.MobiclipDecoder.MobiclipVersion.Moflex3DS);
             d.Data = data;
+            ImageCodecInfo myImageCodecInfo;
+            System.Drawing.Imaging.Encoder myEncoder;
+            EncoderParameter myEncoderParameter;
+            EncoderParameters myEncoderParameters;
+            myImageCodecInfo = GetEncoderInfo("image/png");
+            myEncoder = System.Drawing.Imaging.Encoder.Quality;
+            myEncoderParameters = new EncoderParameters(1);
+            myEncoderParameter = new EncoderParameter(myEncoder, 1L);
+            myEncoderParameters.Param[0] = myEncoderParameter;
             while (!StopThread)
             {
                 if (offs >= data.Length)
@@ -300,22 +292,47 @@ namespace MobiclipDecoder
                 uint blocksize = IOUtil.ReadU32LE(data, offs);
                 d.Offset = offs + 8;
                 Bitmap b = d.DecodeFrame();
-                if (lastval != 0)
+
+                /*if (lastval != 0)
                 {
                     while ((s.Value - lastval) < (long)(ts.TotalSeconds * s.Frequency)) ;
                 }
-                lastval = s.Value;
+                lastval = s.Value;*/
                 try
                 {
-                    pictureBox1.BeginInvoke((Action)delegate
+                    b.Save(String.Concat(i.ToString(), ".png"), myImageCodecInfo, myEncoderParameters);
+                    /*pictureBox1.BeginInvoke((Action)delegate
                     {
                         pictureBox1.Image = b;
                         pictureBox1.Invalidate();
-                    });
+                    });*/
                 }
                 catch { }
                 offs += 4 + (int)(blocksize & ~1);
                 while ((offs % 4) != 0) offs++;
+                i++;
+            }
+
+            Process modump = new Process();
+            modump.StartInfo.FileName = System.IO.Path.GetFullPath($"MoDump.exe");
+            modump.StartInfo.Arguments = $@"""{(String)Args}"" -CheckFrames -AudioDump 1.wav";
+            modump.Start();
+            modump.WaitForExit();
+
+            Process ff = new Process();
+            ff.StartInfo.FileName = System.IO.Path.GetFullPath($"ffmpeg.exe");
+            ff.StartInfo.Arguments = $@"-r ""{fps.ToString()}""/1 -f image2 -s 256x192 -i %d.png -i 1.wav -crf 1 -pix_fmt yuv420p ""{Args.ToString().Replace(".mo", ".mp4")}""";
+            ff.Start();
+            ff.WaitForExit();
+
+            var dir = new DirectoryInfo(".");
+
+            foreach (var file in dir.EnumerateFiles("*.png")) {
+                file.Delete();
+            }
+
+            foreach (var file in dir.EnumerateFiles("1.wav")) {
+                file.Delete();
             }
         }
 
